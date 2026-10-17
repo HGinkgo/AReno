@@ -355,8 +355,13 @@ def load_embedding_norm_head(
     _copy_vocab_shard_from_index(embedding.weight, index, spec.embedding_key, rank, world_size)
     lm_head_weight = attr_path(model, spec.lm_head_attr)
     if model.config.tie_word_embeddings:
-        # Reuse the embedding weight when LM head is tied; no separate copy needed.
-        lm_head_weight.copy_(embedding.weight)
+        # Share the Parameter so both uses accumulate gradients and saving only
+        # the embedding retains every update to the tied output head.
+        if lm_head_weight.shape != embedding.weight.shape:
+            raise ValueError("tied embedding and LM head must have the same local shape")
+        parent_path, _, name = spec.lm_head_attr.rpartition(".")
+        parent = attr_path(model, parent_path) if parent_path else model
+        setattr(parent, name, embedding.weight)
     else:
         _copy_vocab_shard_from_index(lm_head_weight, index, spec.lm_head_key, rank, world_size)
     attr_path(model, spec.norm_attr).copy_(index.get_tensor(spec.norm_key))

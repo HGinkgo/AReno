@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import math
+import os
+import time
 
 import torch
 import torch.distributed as dist
 
+from areno.accel.utils import warn_once
 from areno.engine.data import to_device
 from areno.engine.modeling import param_grad, unwrap_model
 from areno.engine.parallel.context import get_tp_context
 from areno.engine.protocol import TrainPayload
 from areno.engine.runtime.device import accelerator_module
 from areno.engine.runtime.logprobs import (
+    cce_head_supported,
+    packed_cce_logprobs,
     packed_next_token_logprobs,
     packed_next_token_logprobs_from_hidden,
 )
@@ -25,6 +30,19 @@ from areno.engine.runtime.train_step import (
     _pack_train_data,
     _train_meta,
 )
+
+
+def _cce_training_supported(worker, ctx, data_pack, train_model) -> bool:
+    """Return whether the eager CCE training path may replace the LM head."""
+
+    return (
+        os.getenv("ARENO_CCE", "0") == "1"
+        and not worker.config.runtime.compile_model
+        and worker.config.model.model_type == "qwen3"
+        and ctx.world_size == 1
+        and "train_cu_seqlens" in data_pack
+        and cce_head_supported(train_model.lm_head)
+    )
 
 
 class TrainingManager:
@@ -114,9 +132,11 @@ class TrainingManager:
         pack_loss_fn = data_pack.get("_loss_fn")
         auto_tune_probe = callable(pack_loss_fn) and getattr(pack_loss_fn, "__name__", "") == "_dummy_policy_loss"
         accelerator = accelerator_module(worker.device)
-        if auto_tune_probe and accelerator is not None:
+        profile = os.getenv("ARENO_PROFILE_TRAIN", "0") == "1" and worker.device.type == "cuda"
+        if (auto_tune_probe or profile) and accelerator is not None:
             accelerator.synchronize(worker.device)
             accelerator.reset_peak_memory_stats(worker.device)
+        profile_start = time.perf_counter() if profile else None
         data_pack = to_device(data_pack, worker.device)
         data_pack["_activation_checkpointing_enabled"] = worker.config.runtime.activation_checkpointing
         tokens = data_pack["input_ids"].long()
@@ -133,14 +153,26 @@ class TrainingManager:
         }
         if data_pack.get("features") is not None:
             model_kwargs["features"] = data_pack["features"]
-        defer_lm_head = (
+        use_cce = _cce_training_supported(worker, ctx, data_pack, train_model)
+        if os.getenv("ARENO_CCE", "0") == "1" and not use_cce:
+            warn_once(
+                "cce_unsupported",
+                "CCE requested but unsupported: retaining the standard head path "
+                "(requires compile_model=False, packed Qwen3 dense, single GPU, "
+                "unmodified FP32/BF16 CUDA head on SM80+)",
+            )
+        defer_lm_head = use_cce or (
             worker.config.model.model_type == "gemma4" and ctx.world_size == 1 and "train_cu_seqlens" in data_pack
         )
         if defer_lm_head:
             model_kwargs["defer_lm_head"] = True
         with routing_replay_context(train_meta):
             out = train_model(**model_kwargs)
-        if defer_lm_head:
+        if use_cce:
+            logprobs = packed_cce_logprobs(
+                out.hidden_states, tokens, data_pack["train_cu_seqlens"], train_model.lm_head.weight
+            )
+        elif defer_lm_head:
             logprobs = packed_next_token_logprobs_from_hidden(
                 out.hidden_states,
                 tokens,
@@ -222,6 +254,16 @@ class TrainingManager:
             current_lr = worker.optimizer.lr
             multimodal_lrs = self._current_multimodal_lrs()
         if ctx.is_rank0:
+            if profile:
+                accelerator.synchronize(worker.device)
+                if metrics is None:
+                    metrics = {}
+                metrics.update(
+                    train_worker_time_s=time.perf_counter() - profile_start,
+                    cuda_peak_allocated_bytes=accelerator.max_memory_allocated(worker.device),
+                    cuda_peak_reserved_bytes=accelerator.max_memory_reserved(worker.device),
+                    cce_enabled=float(use_cce),
+                )
             if auto_tune_probe and accelerator is not None:
                 accelerator.synchronize(worker.device)
                 total = accelerator.get_device_properties(worker.device).total_memory

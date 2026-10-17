@@ -61,8 +61,8 @@ def _cancel_stop_token(stop_token_ids: list[int], eos_token_id: int | tuple[int,
 
     if stop_token_ids:
         return int(stop_token_ids[0])
-    if isinstance(eos_token_id, tuple) and eos_token_id:
-        return int(eos_token_id[0])
+    if isinstance(eos_token_id, tuple):
+        return int(eos_token_id[0]) if eos_token_id else 0
     if eos_token_id is not None:
         return int(eos_token_id)
     return 0

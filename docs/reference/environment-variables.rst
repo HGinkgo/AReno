@@ -19,6 +19,18 @@ control.
 ``MAX_JOBS``
    Set this to control parallel compilation jobs during editable installs.
 
+``ARENO_CCE``
+   Set ``ARENO_CCE=1`` before starting training to enable the opt-in single-GPU
+   Qwen3 dense CUDA vocabulary projection. Unsupported configurations emit a
+   warning and retain their existing head path. See :doc:`/concepts/cce` for the
+   dtype, hardware, autograd, and model constraints. Disabled by default.
+
+``ARENO_PROFILE_TRAIN``
+   Set ``ARENO_PROFILE_TRAIN=1`` to record synchronized CUDA worker microbatch
+   timing, allocator peaks, and whether CCE was used. Synchronization changes
+   timing; profiling is disabled by default. See :doc:`/concepts/cce` for the
+   measurement scope and gradient accumulation caveat.
+
 For Ascend, the installed ``torch_npu`` selects NPU dependencies and the native
 NPU extension build. Keep the existing PyTorch/torch_npu/CANN versions and use
 ``--no-build-isolation``. CANN's ``set_env.sh`` supplies the compiler paths.

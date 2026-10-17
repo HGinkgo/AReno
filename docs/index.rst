@@ -32,6 +32,7 @@ AReno documentation
    Native LoRA <concepts/native-lora>
    8-bit AdamW <concepts/adamw-8bit>
    4-bit AdamW <concepts/adamw-4bit>
+   Fused Vocabulary Projection <concepts/cce>
    Reward Functions <concepts/reward-functions>
 
 .. toctree::

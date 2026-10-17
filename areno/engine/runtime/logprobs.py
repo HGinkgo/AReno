@@ -21,6 +21,39 @@ from torch.utils.checkpoint import checkpoint
 from areno.engine.parallel.context import get_tp_context
 
 
+def cce_head_supported(lm_head) -> bool:
+    """Conservative dispatch: an unmodified, unsharded CUDA linear head."""
+    from areno.engine.layers.vocab import VocabParallelLMHead
+
+    if type(lm_head) is not VocabParallelLMHead or get_tp_context().world_size != 1:
+        return False
+    weight = lm_head.weight
+    return (
+        weight.device.type == "cuda"
+        and weight.dtype in (torch.float32, torch.bfloat16)
+        and weight.ndim == 2
+        and weight.shape[0] == lm_head.vocab_size
+        and torch.cuda.get_device_capability(weight.device)[0] >= 8
+    )
+
+
+def packed_cce_logprobs(hidden_states, tokens, cu_seqlens, weight):
+    """Project only prediction sites; never cross a packed sequence tail."""
+    from areno.accel.cce import linear_selected_logprobs
+
+    flat_tokens = tokens.reshape(-1)
+    # Shape-sized searchsorted avoids the dynamic boolean indexing used by
+    # the older packed path and is safe during CUDA graph capture.
+    count = flat_tokens.numel() - (cu_seqlens.numel() - 1)
+    action = torch.arange(count, device=tokens.device)
+    ends = cu_seqlens[1:].to(device=tokens.device, dtype=torch.long)
+    action_ends = ends - torch.arange(1, ends.numel() + 1, device=tokens.device)
+    sequence = torch.searchsorted(action_ends, action, right=True)
+    positions = action + sequence
+    hidden = hidden_states.reshape(-1, hidden_states.shape[-1]).index_select(0, positions)
+    return linear_selected_logprobs(hidden, weight, flat_tokens[positions + 1])
+
+
 def next_token_logprobs(
     logits_shard: torch.Tensor,
     tokens: torch.Tensor,

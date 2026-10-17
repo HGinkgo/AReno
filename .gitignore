@@ -47,6 +47,7 @@ ipython_config.py
 # Training outputs, logs, and checkpoints
 runs/
 logs/
+.cce-run/
 .areno-dashboard.pid
 .areno-dashboard.log
 .areno-dashboard-state.json

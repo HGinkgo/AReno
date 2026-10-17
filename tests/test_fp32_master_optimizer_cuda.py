@@ -59,12 +59,12 @@ def test_fused_adamw4bit_rank1_matches_bounded_cpu_reference() -> None:
 
     torch.testing.assert_close(cuda_param.cpu(), cpu_param, rtol=0.0, atol=2.0e-3)
     torch.testing.assert_close(
-        cuda_optimizer._states[0].exp_avg_sq_scale.cpu(),
-        cpu_optimizer._states[0].exp_avg_sq_scale,
+        cuda_optimizer._factored_second_moments[id(cuda_param)].cpu(),
+        cpu_optimizer._factored_second_moments[id(cpu_param)],
         rtol=2.0e-5,
         atol=1.0e-7,
     )
-    assert cuda_optimizer._states[0].exp_avg_sq_scale.numel() == sum(shape)
+    assert cuda_optimizer._factored_second_moments[id(cuda_param)].numel() == sum(shape)
 
 
 def test_fused_fp32_master_adamw_matches_torch_reference() -> None:
